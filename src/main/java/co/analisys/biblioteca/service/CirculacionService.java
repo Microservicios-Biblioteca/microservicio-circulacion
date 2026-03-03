@@ -6,6 +6,8 @@ import co.analisys.biblioteca.exception.PrestamoNoEncontradoException;
 import co.analisys.biblioteca.model.*;
 import co.analisys.biblioteca.repository.PrestamoRepository;
 import jakarta.transaction.Transactional;
+
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -21,107 +23,115 @@ import java.util.List;
 
 @Service
 public class CirculacionService {
-    @Autowired
-    private PrestamoRepository prestamoRepository;
+        @Autowired
+        private PrestamoRepository prestamoRepository;
 
-    @Autowired
-    private RestTemplate restTemplate;
+        @Autowired
+        private RestTemplate restTemplate;
 
-    @Transactional
-    public void prestarLibro(UsuarioId usuarioId, LibroId libroId) {
-        HttpHeaders headers = createAuthHeaders();
-        HttpEntity<Void> disponibilidadRequest = new HttpEntity<>(headers);
+        @Autowired
+        private RabbitTemplate rabbitTemplate;
 
-        ResponseEntity<Boolean> disponibilidadResponse = restTemplate.exchange(
-                "http://localhost:8082/libros/" + libroId.getLibroid_value() + "/disponible",
-                HttpMethod.GET,
-                disponibilidadRequest,
-                Boolean.class);
+        @Transactional
+        public void prestarLibro(UsuarioId usuarioId, LibroId libroId) {
+                HttpHeaders headers = createAuthHeaders();
+                HttpEntity<Void> disponibilidadRequest = new HttpEntity<>(headers);
 
-        Boolean libroDisponible = disponibilidadResponse.getBody();
+                ResponseEntity<Boolean> disponibilidadResponse = restTemplate.exchange(
+                                "http://localhost:8082/libros/" + libroId.getLibroid_value() + "/disponible",
+                                HttpMethod.GET,
+                                disponibilidadRequest,
+                                Boolean.class);
 
-        if (libroDisponible != null && libroDisponible) {
-            Prestamo prestamo = new Prestamo(
-                    new PrestamoId(java.util.UUID.randomUUID().toString()),
-                    usuarioId,
-                    libroId,
-                    new FechaPrestamo(),
-                    new FechaDevolucionPrevista(),
-                    EstadoPrestamo.ACTIVO);
-            prestamoRepository.save(prestamo);
+                Boolean libroDisponible = disponibilidadResponse.getBody();
 
-            // Actualizar disponibilidad
-            HttpHeaders actualizarHeaders = createAuthHeaders();
-            HttpEntity<Boolean> requestEntity = new HttpEntity<>(false, actualizarHeaders);
-            restTemplate.exchange(
-                    "http://localhost:8082" + "/libros/" + libroId.getLibroid_value() + "/disponibilidad",
-                    HttpMethod.PUT,
-                    requestEntity,
-                    Void.class);
+                if (libroDisponible != null && libroDisponible) {
+                        Prestamo prestamo = new Prestamo(
+                                        new PrestamoId(java.util.UUID.randomUUID().toString()),
+                                        usuarioId,
+                                        libroId,
+                                        new FechaPrestamo(),
+                                        new FechaDevolucionPrevista(),
+                                        EstadoPrestamo.ACTIVO);
+                        prestamoRepository.save(prestamo);
 
-            HttpHeaders notificacionHeaders = createAuthHeaders();
-            HttpEntity<NotificacionDTO> notificacionRequest = new HttpEntity<>(
-                    new NotificacionDTO(usuarioId.getUsuarioid_value(),
-                            "Libro prestado: " + libroId.getLibroid_value()),
-                    notificacionHeaders);
+                        // Actualizar disponibilidad
+                        HttpHeaders actualizarHeaders = createAuthHeaders();
+                        HttpEntity<Boolean> requestEntity = new HttpEntity<>(false, actualizarHeaders);
+                        restTemplate.exchange(
+                                        "http://localhost:8082" + "/libros/" + libroId.getLibroid_value()
+                                                        + "/disponibilidad",
+                                        HttpMethod.PUT,
+                                        requestEntity,
+                                        Void.class);
 
-            restTemplate.exchange(
-                    "http://localhost:8084/notificar",
-                    HttpMethod.POST,
-                    notificacionRequest,
-                    Void.class);
-        } else {
-            throw new LibroNoDisponibleException(libroId);
+                        HttpHeaders notificacionHeaders = createAuthHeaders();
+                        HttpEntity<NotificacionDTO> notificacionRequest = new HttpEntity<>(
+                                        new NotificacionDTO(usuarioId.getUsuarioid_value(),
+                                                        "Libro prestado: " + libroId.getLibroid_value()),
+                                        notificacionHeaders);
+
+                        // restTemplate.exchange(
+                        // "http://localhost:8084/notificar",
+                        // HttpMethod.POST,
+                        // notificacionRequest,
+                        // Void.class);
+
+                        rabbitTemplate.convertAndSend("notificacion.exchange", "notificacion.routingkey",
+                                        notificacionRequest);
+                } else {
+                        throw new LibroNoDisponibleException(libroId);
+                }
         }
-    }
 
-    @Transactional
-    public void devolverLibro(PrestamoId prestamoId) {
-        Prestamo prestamo = prestamoRepository.findById(prestamoId)
-                .orElseThrow(() -> new PrestamoNoEncontradoException(prestamoId));
+        @Transactional
+        public void devolverLibro(PrestamoId prestamoId) {
+                Prestamo prestamo = prestamoRepository.findById(prestamoId)
+                                .orElseThrow(() -> new PrestamoNoEncontradoException(prestamoId));
 
-        prestamo.setEstado(EstadoPrestamo.DEVUELTO);
-        prestamoRepository.save(prestamo);
+                prestamo.setEstado(EstadoPrestamo.DEVUELTO);
+                prestamoRepository.save(prestamo);
 
-        HttpHeaders actualizarHeaders = createAuthHeaders();
-        HttpEntity<Boolean> actualizarRequest = new HttpEntity<>(true, actualizarHeaders);
-        restTemplate.exchange(
-                "http://localhost:8082/libros/" + prestamo.getLibroId().getLibroid_value() + "/disponibilidad",
-                HttpMethod.PUT,
-                actualizarRequest,
-                Void.class);
+                HttpHeaders actualizarHeaders = createAuthHeaders();
+                HttpEntity<Boolean> actualizarRequest = new HttpEntity<>(true, actualizarHeaders);
+                restTemplate.exchange(
+                                "http://localhost:8082/libros/" + prestamo.getLibroId().getLibroid_value()
+                                                + "/disponibilidad",
+                                HttpMethod.PUT,
+                                actualizarRequest,
+                                Void.class);
 
-        HttpHeaders notificacionHeaders = createAuthHeaders();
-        HttpEntity<NotificacionDTO> notificacionRequest = new HttpEntity<>(
-                new NotificacionDTO(prestamo.getUsuarioId().getUsuarioid_value(),
-                        "Libro devuelto: " + prestamo.getLibroId().getLibroid_value()),
-                notificacionHeaders);
+                HttpHeaders notificacionHeaders = createAuthHeaders();
+                HttpEntity<NotificacionDTO> notificacionRequest = new HttpEntity<>(
+                                new NotificacionDTO(prestamo.getUsuarioId().getUsuarioid_value(),
+                                                "Libro devuelto: " + prestamo.getLibroId().getLibroid_value()),
+                                notificacionHeaders);
 
-        restTemplate.exchange(
-                "http://localhost:8084/notificar",
-                HttpMethod.POST,
-                notificacionRequest,
-                Void.class);
-    }
-
-    public List<Prestamo> obtenerTodosPrestamos() {
-        return prestamoRepository.findAll();
-    }
-
-    private HttpHeaders createAuthHeaders() {
-        HttpHeaders headers = new HttpHeaders();
-        String token = getCurrentToken();
-        if (token != null && !token.isEmpty()) {
-            headers.setBearerAuth(token);
+                restTemplate.exchange(
+                                "http://localhost:8084/notificar",
+                                HttpMethod.POST,
+                                notificacionRequest,
+                                Void.class);
         }
-        return headers;
-    }
 
-    private String getCurrentToken() {
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication instanceof JwtAuthenticationToken jwtAuthenticationToken) {
-            return jwtAuthenticationToken.getToken().getTokenValue();
+        public List<Prestamo> obtenerTodosPrestamos() {
+                return prestamoRepository.findAll();
         }
-        return null;
-    }
+
+        private HttpHeaders createAuthHeaders() {
+                HttpHeaders headers = new HttpHeaders();
+                String token = getCurrentToken();
+                if (token != null && !token.isEmpty()) {
+                        headers.setBearerAuth(token);
+                }
+                return headers;
+        }
+
+        private String getCurrentToken() {
+                Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+                if (authentication instanceof JwtAuthenticationToken jwtAuthenticationToken) {
+                        return jwtAuthenticationToken.getToken().getTokenValue();
+                }
+                return null;
+        }
 }
