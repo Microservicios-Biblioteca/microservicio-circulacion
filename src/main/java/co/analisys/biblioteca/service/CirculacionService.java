@@ -8,7 +8,12 @@ import co.analisys.biblioteca.repository.PrestamoRepository;
 import jakarta.transaction.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -24,8 +29,16 @@ public class CirculacionService {
 
     @Transactional
     public void prestarLibro(UsuarioId usuarioId, LibroId libroId) {
-        Boolean libroDisponible = restTemplate.getForObject(
-                "http://localhost:8082/libros/" + libroId.getLibroid_value() + "/disponible", Boolean.class);
+        HttpHeaders headers = createAuthHeaders();
+        HttpEntity<Void> disponibilidadRequest = new HttpEntity<>(headers);
+
+        ResponseEntity<Boolean> disponibilidadResponse = restTemplate.exchange(
+                "http://localhost:8082/libros/" + libroId.getLibroid_value() + "/disponible",
+                HttpMethod.GET,
+                disponibilidadRequest,
+                Boolean.class);
+
+        Boolean libroDisponible = disponibilidadResponse.getBody();
 
         if (libroDisponible != null && libroDisponible) {
             Prestamo prestamo = new Prestamo(
@@ -34,22 +47,28 @@ public class CirculacionService {
                     libroId,
                     new FechaPrestamo(),
                     new FechaDevolucionPrevista(),
-                    EstadoPrestamo.ACTIVO
-            );
+                    EstadoPrestamo.ACTIVO);
             prestamoRepository.save(prestamo);
 
             // Actualizar disponibilidad
-            HttpEntity<Boolean> requestEntity = new HttpEntity<>(false);
+            HttpHeaders actualizarHeaders = createAuthHeaders();
+            HttpEntity<Boolean> requestEntity = new HttpEntity<>(false, actualizarHeaders);
             restTemplate.exchange(
                     "http://localhost:8082" + "/libros/" + libroId.getLibroid_value() + "/disponibilidad",
                     HttpMethod.PUT,
                     requestEntity,
-                    Void.class
-            );
+                    Void.class);
 
-            restTemplate.postForObject(
+            HttpHeaders notificacionHeaders = createAuthHeaders();
+            HttpEntity<NotificacionDTO> notificacionRequest = new HttpEntity<>(
+                    new NotificacionDTO(usuarioId.getUsuarioid_value(),
+                            "Libro prestado: " + libroId.getLibroid_value()),
+                    notificacionHeaders);
+
+            restTemplate.exchange(
                     "http://localhost:8084/notificar",
-                    new NotificacionDTO(usuarioId.getUsuarioid_value(), "Libro prestado: " + libroId.getLibroid_value()),
+                    HttpMethod.POST,
+                    notificacionRequest,
                     Void.class);
         } else {
             throw new LibroNoDisponibleException(libroId);
@@ -64,15 +83,45 @@ public class CirculacionService {
         prestamo.setEstado(EstadoPrestamo.DEVUELTO);
         prestamoRepository.save(prestamo);
 
-        restTemplate.put("http://localhost:8082/libros/" + prestamo.getLibroId().getLibroid_value() + "/disponibilidad", true);
+        HttpHeaders actualizarHeaders = createAuthHeaders();
+        HttpEntity<Boolean> actualizarRequest = new HttpEntity<>(true, actualizarHeaders);
+        restTemplate.exchange(
+                "http://localhost:8082/libros/" + prestamo.getLibroId().getLibroid_value() + "/disponibilidad",
+                HttpMethod.PUT,
+                actualizarRequest,
+                Void.class);
 
-        restTemplate.postForObject(
+        HttpHeaders notificacionHeaders = createAuthHeaders();
+        HttpEntity<NotificacionDTO> notificacionRequest = new HttpEntity<>(
+                new NotificacionDTO(prestamo.getUsuarioId().getUsuarioid_value(),
+                        "Libro devuelto: " + prestamo.getLibroId().getLibroid_value()),
+                notificacionHeaders);
+
+        restTemplate.exchange(
                 "http://localhost:8084/notificar",
-                new NotificacionDTO(prestamo.getUsuarioId().getUsuarioid_value(), "Libro devuelto: " + prestamo.getLibroId().getLibroid_value()),
+                HttpMethod.POST,
+                notificacionRequest,
                 Void.class);
     }
 
     public List<Prestamo> obtenerTodosPrestamos() {
         return prestamoRepository.findAll();
+    }
+
+    private HttpHeaders createAuthHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        String token = getCurrentToken();
+        if (token != null && !token.isEmpty()) {
+            headers.setBearerAuth(token);
+        }
+        return headers;
+    }
+
+    private String getCurrentToken() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication instanceof JwtAuthenticationToken jwtAuthenticationToken) {
+            return jwtAuthenticationToken.getToken().getTokenValue();
+        }
+        return null;
     }
 }
